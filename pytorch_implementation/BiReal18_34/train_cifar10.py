@@ -17,13 +17,15 @@ import torch.utils.data.distributed
 from utils import *
 from torchvision import datasets, transforms
 from torch.autograd import Variable
-from birealnet import birealnet18
+#from birealnet import birealnet18
+from birealnet_cifar10 import birealnet18
 
+from ninpy.dataset import load_toy_dataset, get_cifar10_transforms
 
 parser = argparse.ArgumentParser("birealnet")
-parser.add_argument('--batch_size', type=int, default=512, help='batch size')
+parser.add_argument('--batch_size', type=int, default=256, help='batch size')
 parser.add_argument('--epochs', type=int, default=256, help='num of training epochs')
-parser.add_argument('--learning_rate', type=float, default=0.001, help='init learning rate')
+parser.add_argument('--learning_rate', type=float, default=1e-3, help='init learning rate')
 parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
 parser.add_argument('--weight_decay', type=float, default=0, help='weight decay')
 parser.add_argument('--save', type=str, default='./models', help='path for saving trained models')
@@ -33,7 +35,7 @@ parser.add_argument('-j', '--workers', default=8, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 args = parser.parse_args()
 
-CLASSES = 1000
+CLASSES = 10
 
 if not os.path.exists('log'):
     os.mkdir('log')
@@ -61,12 +63,15 @@ def main():
 
     criterion = nn.CrossEntropyLoss()
     criterion = criterion.cuda()
-    criterion_smooth = CrossEntropyLabelSmooth(CLASSES, args.label_smooth)
-    criterion_smooth = criterion_smooth.cuda()
+    criterion_smooth = nn.CrossEntropyLoss()
+    criterion_smooth = criterion.cuda()
+    #criterion_smooth = CrossEntropyLabelSmooth(CLASSES, args.label_smooth)
+    #criterion_smooth = criterion_smooth.cuda()
 
     all_parameters = model.parameters()
     weight_parameters = []
     for pname, p in model.named_parameters():
+        # skip weight decay
         if p.ndimension() == 4 or pname=='classifier.0.weight' or pname == 'classifier.0.bias':
             weight_parameters.append(p)
     weight_parameters_id = list(map(id, weight_parameters))
@@ -77,7 +82,8 @@ def main():
             {'params' : weight_parameters, 'weight_decay' : args.weight_decay}],
             lr=args.learning_rate,)
 
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step : (1.0-step/args.epochs), last_epoch=-1)
+    #scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step : (1.0-step/args.epochs), last_epoch=-1)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.1)
     start_epoch = 0
     best_top1_acc= 0
 
@@ -94,40 +100,10 @@ def main():
     for epoch in range(start_epoch):
         scheduler.step()
 
-    # load training data
-    traindir = os.path.join(args.data, 'train')
-    valdir = os.path.join(args.data, 'val')
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-
-    # data augmentation
-    crop_scale = 0.08
-    lighting_param = 0.1
-    train_transforms = transforms.Compose([
-        transforms.RandomResizedCrop(224, scale=(crop_scale, 1.0)),
-        Lighting(lighting_param),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize])
-
-    train_dataset = datasets.ImageFolder(
-        traindir,
-        transform=train_transforms)
-
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.workers, pin_memory=True)
-
-    # load validation data
-    val_loader = torch.utils.data.DataLoader(
-        datasets.ImageFolder(valdir, transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            normalize,
-        ])),
-        batch_size=args.batch_size, shuffle=False,
-        num_workers=args.workers, pin_memory=True)
+    train_transforms, test_transforms = get_cifar10_transforms()
+    train_loader, val_loader = load_toy_dataset(
+        args.batch_size, args.batch_size, 8, 'cifar10',
+        './dataset', True, train_transforms, test_transforms)
 
     # train the model
     epoch = start_epoch
@@ -159,11 +135,6 @@ def train(epoch, train_loader, model, criterion, optimizer, scheduler):
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
-
-    progress = ProgressMeter(
-        len(train_loader),
-        [batch_time, data_time, losses, top1, top5],
-        prefix="Epoch: [{}]".format(epoch))
 
     model.train()
     end = time.time()
@@ -198,7 +169,7 @@ def train(epoch, train_loader, model, criterion, optimizer, scheduler):
         batch_time.update(time.time() - end)
         end = time.time()
 
-        progress.display(i)
+        #progress.display(i)
 
     return losses.avg, top1.avg, top5.avg
 
@@ -207,10 +178,6 @@ def validate(epoch, val_loader, model, criterion, args):
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
-    progress = ProgressMeter(
-        len(val_loader),
-        [batch_time, losses, top1, top5],
-        prefix='Test: ')
 
     # switch to evaluation mode
     model.eval()
@@ -235,13 +202,13 @@ def validate(epoch, val_loader, model, criterion, args):
             batch_time.update(time.time() - end)
             end = time.time()
 
-            progress.display(i)
+            # progress.display(i)
 
-        print(' * acc@1 {top1.avg:.3f} acc@5 {top5.avg:.3f}'
-              .format(top1=top1, top5=top5))
+    print(f'Epoch {epoch}, acc@1 {top1.avg:.3f} acc@5 {top5.avg:.3f}'.format(top1=top1, top5=top5))
 
     return losses.avg, top1.avg, top5.avg
 
 
 if __name__ == '__main__':
     main()
+
